@@ -1,0 +1,46 @@
+/* Tailwind CDN で賄えない補助スタイルのみをここに置く */
+
+:root {
+  /* Claudeオレンジをアクセントとして一元管理する（Tailwindの任意色より参照が明快なため） */
+  --accent: #c15f3c;
+  --accent-weak: #faf0eb;
+}
+
+body {
+  font-family: "游ゴシック", "Yu Gothic", sans-serif;
+}
+
+/* 選択中の顧客カード: 左のオレンジ縦ライン＋薄いオレンジ背景 */
+.customer-card.is-selected {
+  background-color: var(--accent-weak);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* カンバンの商談カード左端に3pxのステータスアクセントライン */
+.deal-kanban-card {
+  border-left: 3px solid transparent;
+}
+.deal-kanban-card.status-lead {
+  border-left-color: #9ca3af; /* gray-400 */
+}
+.deal-kanban-card.status-proposal {
+  border-left-color: var(--accent);
+}
+.deal-kanban-card.status-won {
+  border-left-color: #16a34a; /* green-600 */
+}
+
+/* メモなどの改行を保持して表示する */
+.preserve-lines {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* リスト・カンバン列内のスクロール領域で余白が詰まって見えないよう薄いスクロールバーにする */
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background-color: #e5e7eb;
+  border-radius: 9999px;
+}
