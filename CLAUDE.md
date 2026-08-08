@@ -10,10 +10,10 @@
 |---|---|
 | マークアップ | HTML5（`index.html` 1枚） |
 | スタイル | Tailwind CSS（CDN読み込み） + `styles.css`（補助のみ） |
-| スクリプト | JavaScript（vanilla、ES2020+、フレームワーク禁止） |
-| 永続化 | ブラウザの `localStorage` |
-| ビルド | なし（npm・bundler・トランスパイラすべて使わない） |
-| 外部通信 | なし（API・CDN経由のTailwind以外は読み込まない） |
+| スクリプト | JavaScript（vanilla、ES2020+、ESモジュール、フレームワーク禁止） |
+| 永続化 | Supabase（Postgres）— `@supabase/supabase-js` を npm 依存として利用 |
+| ビルド | Vite（`npm run dev` / `npm run build`）。バンドルは Vite に任せる |
+| 外部通信 | Supabase REST（`supabase-js`経由）＋CDN（Tailwind）のみ |
 
 ---
 
@@ -21,14 +21,22 @@
 
 ```
 s5v6-crm/
-├── index.html      # マークアップ・Tailwind CDN読み込み・全ビュー/モードのDOM
-├── app.js          # 全ロジック（CRUD・描画・イベント・localStorage）
+├── index.html      # Vite エントリ。Tailwind CDN読み込み・全ビュー/モードのDOM・app.js を module 読み込み
+├── app.js          # 全ロジック（CRUD・描画・イベント・Supabaseアクセス）。ESモジュール
 ├── styles.css      # Tailwindで賄えない補助スタイルのみ
+├── package.json    # Vite / supabase-js の依存とスクリプト（dev / build / preview）
+├── .env            # VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY（gitignore対象）
+├── .gitignore      # .env / node_modules / dist を除外
 ├── CLAUDE.md       # 本ファイル（開発規約）
 └── spec.md         # 仕様書
+
+supabase.sql        # Supabaseスキーマ（テーブル・RLS・初期データ）。SQL Editorで一発実行
 ```
 
-- ファイルは index.html / app.js / styles.css の **3枚で完結** させる。追加ファイルは作らない。
+- フロントの実装は index.html / app.js / styles.css の **3枚に集約** する。ロジックは app.js に寄せる。
+- ビルド・依存管理は Vite / npm（`package.json`）に任せる。`node_modules` はコミットしない。
+- 接続情報は `.env`（`VITE_` プレフィックス）に置き、`import.meta.env` 経由で参照する。鍵は絶対にコミットしない。
+- DBスキーマは `supabase.sql` に集約する（SQL Editorで一発実行できる冪等スクリプト）。追加実行が必要なSQLを残さない。
 - 画像・アイコンはインラインSVGかUnicode絵文字で賄う（外部画像ファイル禁止）。
 
 ---
@@ -60,7 +68,7 @@ s5v6-crm/
 - **関数は50行以内**。超えたら分割する。
 - **ネストは3段階まで**。早期リターン・ガード節で平坦化する。
 - **変数宣言は `const` を優先**。再代入が必要なものだけ `let`。`var` は禁止。
-- **グローバル汚染禁止**：`app.js` 全体を即時実行関数 `(() => { ... })()` で包む。
+- **グローバル汚染禁止**：`app.js` は ESモジュール（`import`）で読み込み、加えて全体を即時実行関数 `(() => { ... })()` で包む。`import` はファイル先頭に置く。
 - **DOM参照はキャッシュ** する（都度 `getElementById` を呼ばない）。
 - **イベントリスナーは集約** する。可能な限りイベントデリゲーションを使う。
 - 引数が来ないケースは早期returnで弾く。
@@ -79,14 +87,14 @@ s5v6-crm/
 
 ```js
 {
-  id: "1714012345678",            // 文字列、Date.now() ベースで自動採番
+  id: "d290f1ee-6c54-4b01-90e6-d701748f0851", // uuid、DBが gen_random_uuid() で自動採番
   company: "株式会社サンプル",     // 必須
-  contact: "山田 太郎",            // 必須（担当者名）
+  name: "山田 太郎",              // 必須（担当者名）
   title: "営業部長",              // 任意
   email: "taro@example.com",     // 任意
   phone: "03-1234-5678",         // 任意
   memo: "展示会で名刺交換",       // 任意、複数行可
-  createdAt: "2026-04-24T09:00:00.000Z" // ISO文字列、必須
+  created_at: "2026-04-24T09:00:00.000Z" // ISO文字列、DBが now() で自動設定
 }
 ```
 
@@ -94,25 +102,26 @@ s5v6-crm/
 
 ```js
 {
-  id: "1714012399999",            // 文字列、Date.now() ベースで自動採番
-  customerId: "1714012345678",   // 必須、顧客のidと一致（1対多の親）
+  id: "9b2e7c1a-3f4d-4a2b-8c5e-1d6f0a9b8c7d", // uuid、DBが gen_random_uuid() で自動採番
+  customer_id: "d290f1ee-6c54-4b01-90e6-d701748f0851", // 必須、顧客のidと一致（1対多の親）
   title: "サービスA導入提案",     // 必須
   amount: 1500000,                // 整数（円）、任意
   status: "lead",                // "lead" / "proposal" / "won" のいずれか
   memo: "次回はデモを実施",       // 任意、複数行可
-  createdAt: "2026-04-24T09:00:00.000Z", // 必須
-  updatedAt: "2026-04-24T09:00:00.000Z"  // 保存のたびに更新
+  created_at: "2026-04-24T09:00:00.000Z", // DBが now() で自動設定
+  updated_at: "2026-04-24T09:00:00.000Z"  // 保存のたびにDBトリガが自動更新
 }
 ```
 
-### 4.3 localStorage
+### 4.3 Supabase
 
-- **顧客キー**: `crm-customers` — 顧客オブジェクトの配列（JSON文字列）
-- **商談キー**: `crm-deals` — 商談オブジェクトの配列（JSON文字列）
-- 読み込み: `JSON.parse(localStorage.getItem("crm-customers") ?? "[]")`
-- 保存: `localStorage.setItem("crm-customers", JSON.stringify(customers))`
-- 顧客の表示順は **作成日時の新しい順**（`createdAt` の降順）。保存時は順序不問。
-- **1対多の紐付け**: 商談は `customerId` で顧客を参照する。顧客削除時は同じ `customerId` を持つ商談をまとめて削除する（連鎖削除）。
+- **テーブル**: `customers`（顧客）と `deals`（商談）の2テーブル。スキーマは `supabase.sql`。
+- **接続**: `app.js` 冒頭の `SUPABASE_URL` / `SUPABASE_KEY`（Publishable key）で `createClient` する。
+- 読み込み: `sb.from("customers").select("*").order("created_at", { ascending: false })`
+- 保存: INSERT時は `id` / `created_at` を送らずDBのデフォルトに任せる。UPDATE時の `updated_at` はDBトリガが自動更新するため送らない。
+- 顧客の表示順は **作成日時の新しい順**（`created_at` の降順）。DB側で order して取得する。
+- **1対多の紐付け**: 商談は `customer_id` で顧客を参照する。顧客削除時はDBの `ON DELETE CASCADE` で紐付く商談が自動削除される（アプリ側で個別DELETEしない）。
+- **RLS**: 両テーブルで有効化し、Publishable key（anonロール）に select / insert / update / delete を許可するポリシーを各テーブル4つ設定する。
 
 ---
 
@@ -146,12 +155,12 @@ s5v6-crm/
 
 ## 7. やってはいけないこと
 
-- `npm install` / `package.json` の作成 — ビルド環境は作らない
-- webpack / vite / parcel / esbuild など **バンドラ禁止**
-- React / Vue / Svelte などの **フレームワーク禁止**
-- サーバーサイド（Node.js / Express / Next.js API など）の導入禁止
-- localStorage 以外の永続化（IndexedDB・外部DB・クラウドストレージ）
-- 外部API呼び出し（`fetch` による通信）
+- React / Vue / Svelte などの **フレームワーク禁止**（UIは vanilla JS を維持）
+- Vite / npm 以外のビルド系（webpack / parcel など）への乗り換え禁止
+- `.env`（Supabaseの鍵）をリポジトリにコミットしない
+- 自前のサーバーサイド実装（Node.js / Express / Next.js API など）の追加禁止 — 永続化はSupabase（BaaS）に任せる
+- Supabase 以外の永続化の併用禁止（localStorage・IndexedDB・他DB・クラウドストレージ）
+- Supabase 以外の外部API呼び出し（他サービスへの `fetch` 通信）
 - 外部画像ファイルのダウンロード・同梱
 - モバイル対応のためのCSS追加（PC表示のみで十分）
 - ドラッグ＆ドロップによるカンバン操作（クリック式の「←」「→」で代替する）

@@ -1,10 +1,18 @@
 // 顧客管理アプリ 全ロジック。グローバル汚染を避けるため即時実行関数で包む。
+// 永続化は Supabase（Postgres）。Publishable key で RLS 越しに読み書きする。
+import { createClient } from "@supabase/supabase-js";
+
 (() => {
   "use strict";
 
+  // ---- Supabase 接続設定 ----
+  // URL / Publishable key は .env（VITE_ プレフィックス）から Vite が注入する。
+  const sb = createClient(
+    import.meta.env.VITE_SUPABASE_URL,
+    import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+  );
+
   // ---- 定数 ----
-  const KEY_CUSTOMERS = "crm-customers";
-  const KEY_DEALS = "crm-deals";
   // ステータスは左→右の順序でカンバン列と「←」「→」遷移の基準になる
   const STATUSES = ["lead", "proposal", "won"];
   const STATUS_LABEL = { lead: "見込み", proposal: "提案", won: "成約" };
@@ -15,7 +23,7 @@
     won: "bg-green-100 text-green-700",
   };
 
-  // ---- 状態 ----
+  // ---- 状態（Supabase から取得した行のローカルキャッシュ） ----
   let customers = [];
   let deals = [];
   let selectedCustomerId = null; // 現在詳細表示中の顧客
@@ -43,25 +51,32 @@
     ids.forEach((id) => { el[id] = document.getElementById(id); });
   };
 
-  // ---- 永続化 ----
-  const loadData = () => {
-    customers = JSON.parse(localStorage.getItem(KEY_CUSTOMERS) ?? "[]");
-    deals = JSON.parse(localStorage.getItem(KEY_DEALS) ?? "[]");
+  // ---- 永続化（Supabase）----
+  // 顧客は作成日時の新しい順で取得。商談は customer_id で紐付くので順序不問。
+  const loadData = async () => {
+    const [cRes, dRes] = await Promise.all([
+      sb.from("customers").select("*").order("created_at", { ascending: false }),
+      // 商談カードに会社名を出すため、親 customers の company を結合して取得
+      sb.from("deals").select("*, customers(company)"),
+    ]);
+    if (cRes.error) throw cRes.error;
+    if (dRes.error) throw dRes.error;
+    customers = cRes.data;
+    deals = dRes.data;
   };
-  const saveCustomers = () => localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(customers));
-  const saveDeals = () => localStorage.setItem(KEY_DEALS, JSON.stringify(deals));
 
   // ---- ユーティリティ ----
-  const nowIso = () => new Date().toISOString();
-  const genId = () => String(Date.now()) + Math.floor(Math.random() * 1000);
   const findCustomer = (id) => customers.find((c) => c.id === id);
   const findDeal = (id) => deals.find((d) => d.id === id);
-  const dealsOf = (customerId) => deals.filter((d) => d.customerId === customerId);
+  const dealsOf = (customerId) => deals.filter((d) => d.customer_id === customerId);
+  // 結合した customers(company) を優先し、無ければ顧客キャッシュから会社名を引く
+  const dealCompany = (d) =>
+    d.customers?.company ?? findCustomer(d.customer_id)?.company ?? "（顧客不明）";
   const formatYen = (amount) =>
     typeof amount === "number" ? "¥" + amount.toLocaleString("ja-JP") : "—";
   // 作成日時の新しい順（降順）で並べた顧客配列を返す
   const sortedCustomers = () =>
-    [...customers].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    [...customers].sort((a, b) => b.created_at.localeCompare(a.created_at));
 
   const escapeHtml = (str) =>
     String(str ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -107,7 +122,7 @@
   // 会社名・担当者名・役職を横断検索
   const matchesKeyword = (c, keyword) => {
     if (!keyword) return true;
-    return [c.company, c.contact, c.title]
+    return [c.company, c.name, c.title]
       .some((v) => (v ?? "").toLowerCase().includes(keyword));
   };
 
@@ -121,7 +136,7 @@
       (c.id === selectedCustomerId ? " is-selected" : "");
     div.innerHTML =
       `<div class="font-medium text-sm">${escapeHtml(c.company)}</div>` +
-      `<div class="text-xs text-gray-600 mt-0.5">${escapeHtml(c.contact)}` +
+      `<div class="text-xs text-gray-600 mt-0.5">${escapeHtml(c.name)}` +
       (c.title ? ` <span class="text-gray-400">${escapeHtml(c.title)}</span>` : "") +
       `</div>` +
       `<div class="text-xs text-gray-400 mt-1">商談 ${count}件</div>`;
@@ -134,7 +149,7 @@
     if (!c) return;
     selectedCustomerId = id;
     el["detail-company"].textContent = c.company;
-    el["detail-contact"].textContent = c.contact;
+    el["detail-contact"].textContent = c.name;
     el["detail-title"].textContent = c.title ? `／${c.title}` : "";
     el["detail-email"].textContent = c.email || "—";
     el["detail-phone"].textContent = c.phone || "—";
@@ -175,7 +190,7 @@
     const c = id ? findCustomer(id) : null;
     el["customer-form-title"].textContent = c ? "編集" : "新規顧客";
     el["input-company"].value = c?.company ?? "";
-    el["input-contact"].value = c?.contact ?? "";
+    el["input-contact"].value = c?.name ?? "";
     el["input-title"].value = c?.title ?? "";
     el["input-email"].value = c?.email ?? "";
     el["input-phone"].value = c?.phone ?? "";
@@ -184,32 +199,47 @@
     showPane("pane-customer-form");
   };
 
-  const saveCustomer = () => {
+  const saveCustomer = async () => {
     const company = el["input-company"].value.trim();
-    const contact = el["input-contact"].value.trim();
-    if (!company || !contact) {
+    const name = el["input-contact"].value.trim();
+    if (!company || !name) {
       showError("customer-form-error", "会社名と担当者名は必須です");
       return;
     }
+    // id / created_at は DB のデフォルトに任せるため送らない
     const fields = {
-      company, contact,
+      company, name,
       title: el["input-title"].value.trim(),
       email: el["input-email"].value.trim(),
       phone: el["input-phone"].value.trim(),
       memo: el["input-memo"].value.trim(),
     };
-    if (editingCustomerId) {
-      Object.assign(findCustomer(editingCustomerId), fields);
-    } else {
-      const created = { id: genId(), ...fields, createdAt: nowIso() };
-      customers.push(created);
-      editingCustomerId = created.id;
+    try {
+      const saved = await upsertCustomer(fields);
+      renderCustomerDetail(saved.id);
+    } catch (e) {
+      showError("customer-form-error", "保存に失敗しました：" + e.message);
     }
-    saveCustomers();
-    renderCustomerDetail(editingCustomerId);
   };
 
-  const deleteCustomer = (id) => {
+  // 編集なら UPDATE、新規なら INSERT。保存後の行でローカルキャッシュを更新する。
+  const upsertCustomer = async (fields) => {
+    if (editingCustomerId) {
+      const { data, error } = await sb.from("customers")
+        .update(fields).eq("id", editingCustomerId).select().single();
+      if (error) throw error;
+      Object.assign(findCustomer(editingCustomerId), data);
+      return data;
+    }
+    const { data, error } = await sb.from("customers")
+      .insert(fields).select().single();
+    if (error) throw error;
+    customers.push(data);
+    editingCustomerId = data.id;
+    return data;
+  };
+
+  const deleteCustomer = async (id) => {
     const c = findCustomer(id);
     if (!c) return;
     const count = dealsOf(id).length;
@@ -217,10 +247,14 @@
       ? `「${c.company}」を削除します。紐付く商談${count}件も一緒に削除されます。よろしいですか？`
       : `「${c.company}」を削除します。よろしいですか？`;
     if (!confirm(msg)) return;
+    // 商談は DB 側の ON DELETE CASCADE で消えるので、顧客のみ削除すればよい
+    const { error } = await sb.from("customers").delete().eq("id", id);
+    if (error) {
+      alert("削除に失敗しました：" + error.message);
+      return;
+    }
     customers = customers.filter((x) => x.id !== id);
-    deals = deals.filter((d) => d.customerId !== id); // 連鎖削除
-    saveCustomers();
-    saveDeals();
+    deals = deals.filter((d) => d.customer_id !== id); // ローカルキャッシュも連鎖削除
     selectedCustomerId = null;
     showPane("pane-empty");
     renderCustomerList();
@@ -244,7 +278,7 @@
     showPane("pane-deal-form");
   };
 
-  const saveDeal = () => {
+  const saveDeal = async () => {
     const title = el["input-deal-title"].value.trim();
     if (!title) {
       showError("deal-form-error", "タイトルは必須です");
@@ -252,43 +286,64 @@
     }
     const amountRaw = el["input-deal-amount"].value.trim();
     const amount = amountRaw === "" ? null : Math.round(Number(amountRaw));
+    // updated_at は DB のトリガが UPDATE 時に自動更新するため送らない
     const fields = {
       title, amount,
       status: el["input-deal-status"].value,
       memo: el["input-deal-memo"].value.trim(),
-      updatedAt: nowIso(),
     };
-    if (editingDealId) {
-      Object.assign(findDeal(editingDealId), fields);
-    } else {
-      deals.push({
-        id: genId(), customerId: dealFormCustomerId, ...fields, createdAt: nowIso(),
-      });
+    try {
+      await upsertDeal(fields);
+      renderCustomerDetail(dealFormCustomerId);
+    } catch (e) {
+      showError("deal-form-error", "保存に失敗しました：" + e.message);
     }
-    saveDeals();
-    renderCustomerDetail(dealFormCustomerId);
   };
 
-  const deleteDeal = (id) => {
+  const upsertDeal = async (fields) => {
+    if (editingDealId) {
+      const { data, error } = await sb.from("deals")
+        .update(fields).eq("id", editingDealId).select("*, customers(company)").single();
+      if (error) throw error;
+      Object.assign(findDeal(editingDealId), data);
+      return data;
+    }
+    const { data, error } = await sb.from("deals")
+      .insert({ ...fields, customer_id: dealFormCustomerId })
+      .select("*, customers(company)").single();
+    if (error) throw error;
+    deals.push(data);
+    return data;
+  };
+
+  const deleteDeal = async (id) => {
     const d = findDeal(id);
     if (!d) return;
     if (!confirm(`商談「${d.title}」を削除します。よろしいですか？`)) return;
-    const customerId = d.customerId;
+    const customerId = d.customer_id;
+    const { error } = await sb.from("deals").delete().eq("id", id);
+    if (error) {
+      alert("削除に失敗しました：" + error.message);
+      return;
+    }
     deals = deals.filter((x) => x.id !== id);
-    saveDeals();
     renderCustomerDetail(customerId);
   };
 
   // パイプラインの「←」「→」でステータスを隣の列へ動かす（フォームを開かず直接更新）
-  const moveDealStatus = (id, direction) => {
+  const moveDealStatus = async (id, direction) => {
     const d = findDeal(id);
     if (!d) return;
     const idx = STATUSES.indexOf(d.status);
     const next = idx + direction;
     if (next < 0 || next >= STATUSES.length) return;
-    d.status = STATUSES[next];
-    d.updatedAt = nowIso();
-    saveDeals();
+    const { data, error } = await sb.from("deals")
+      .update({ status: STATUSES[next] }).eq("id", id).select("*, customers(company)").single();
+    if (error) {
+      alert("更新に失敗しました：" + error.message);
+      return;
+    }
+    Object.assign(d, data); // updated_at も含め DB の値で更新
     renderPipeline();
   };
 
@@ -308,7 +363,6 @@
   };
 
   const buildKanbanCard = (d) => {
-    const c = findCustomer(d.customerId);
     const idx = STATUSES.indexOf(d.status);
     const card = document.createElement("div");
     card.dataset.dealId = d.id;
@@ -316,7 +370,7 @@
     card.innerHTML =
       `<div class="deal-open cursor-pointer">` +
       `<div class="text-sm font-medium">${escapeHtml(d.title)}</div>` +
-      `<div class="text-xs text-gray-500 mt-0.5">${escapeHtml(c ? c.company : "（顧客不明）")}</div>` +
+      `<div class="text-xs text-gray-500 mt-0.5">${escapeHtml(dealCompany(d))}</div>` +
       `<div class="text-sm text-gray-600 mt-1">${formatYen(d.amount)}</div>` +
       `</div>` +
       `<div class="flex justify-end gap-1 mt-2">` +
@@ -388,39 +442,25 @@
     if (opener) {
       const card = opener.closest("[data-deal-id]");
       const d = findDeal(card.dataset.dealId);
-      if (d) openDealForm(d.customerId, d.id);
+      if (d) openDealForm(d.customer_id, d.id);
     }
   };
 
-  // ---- 初期サンプルデータ（localStorageが空のときのみ） ----
-  const seedIfEmpty = () => {
-    if (localStorage.getItem(KEY_CUSTOMERS) !== null) return;
-    const t = Date.now();
-    const cs = [
-      { id: "c1", company: "株式会社アオゾラ商事", contact: "田村 健一", title: "購買部 課長", email: "tamura@aozora.example", phone: "03-1111-2222", memo: "展示会で名刺交換。来期の予算取りを検討中。", createdAt: new Date(t - 3000).toISOString() },
-      { id: "c2", company: "みどりテクノロジー株式会社", contact: "佐々木 遥", title: "情報システム部", email: "sasaki@midori.example", phone: "06-3333-4444", memo: "既存ツールからの乗り換えに関心あり。", createdAt: new Date(t - 2000).toISOString() },
-      { id: "c3", company: "ひまわり物流合同会社", contact: "中村 誠", title: "代表社員", email: "nakamura@himawari.example", phone: "052-5555-6666", memo: "紹介経由。まずは小規模から。", createdAt: new Date(t - 1000).toISOString() },
-    ];
-    const ds = [
-      { id: "d1", customerId: "c1", title: "サービスA導入提案", amount: 1500000, status: "proposal", memo: "次回はデモを実施", createdAt: new Date(t).toISOString(), updatedAt: new Date(t).toISOString() },
-      { id: "d2", customerId: "c1", title: "保守サポート契約", amount: 300000, status: "lead", memo: "予算確認待ち", createdAt: new Date(t).toISOString(), updatedAt: new Date(t).toISOString() },
-      { id: "d3", customerId: "c2", title: "全社ライセンス切替", amount: 4200000, status: "won", memo: "契約締結済み。導入支援へ", createdAt: new Date(t).toISOString(), updatedAt: new Date(t).toISOString() },
-      { id: "d4", customerId: "c2", title: "追加モジュール提案", amount: 800000, status: "lead", memo: "", createdAt: new Date(t).toISOString(), updatedAt: new Date(t).toISOString() },
-      { id: "d5", customerId: "c3", title: "トライアル導入", amount: 120000, status: "proposal", memo: "3拠点で試験運用", createdAt: new Date(t).toISOString(), updatedAt: new Date(t).toISOString() },
-    ];
-    localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cs));
-    localStorage.setItem(KEY_DEALS, JSON.stringify(ds));
-  };
-
   // ---- 起動 ----
-  const init = () => {
+  const init = async () => {
     cacheDom();
-    seedIfEmpty();
-    loadData();
     bindEvents();
     showView("customers");
     showPane("pane-empty");
-    renderCustomerList();
+    el["customer-list"].innerHTML =
+      '<p class="text-gray-400 text-sm text-center py-8">読み込み中…</p>';
+    try {
+      await loadData();
+      renderCustomerList();
+    } catch (e) {
+      el["customer-list"].innerHTML =
+        `<p class="text-red-600 text-sm text-center py-8">読み込みに失敗しました：${escapeHtml(e.message)}</p>`;
+    }
   };
 
   document.addEventListener("DOMContentLoaded", init);
