@@ -9,30 +9,39 @@
 - **顧客管理**: 会社名・担当者・役職・連絡先・メモの登録／検索／編集／削除
 - **商談管理**: 顧客に紐づく商談（タイトル・金額・ステータス・メモ）の CRUD
 - **パイプライン**: 見込み／提案／成約の3列カンバン。「←」「→」でステータスを移動
-- **連鎖削除**: 顧客を削除すると紐づく商談もまとめて削除
-- **永続化**: すべて `localStorage` に保存（サーバー不要）
+- **連鎖削除**: 顧客を削除すると紐づく商談もまとめて削除（DBの `ON DELETE CASCADE`）
+- **永続化**: Supabase（Postgres）に保存し、どの端末からでも同じデータを参照
 
 ## 技術スタック
 
 - HTML5 + Tailwind CSS（CDN）
-- Vanilla JavaScript（フレームワーク・ビルドツールなし）
-- `localStorage` による永続化
+- Vanilla JavaScript（ESモジュール、フレームワークなし）
+- ビルド: Vite
+- 永続化: Supabase（`@supabase/supabase-js`）
 
-ファイルは `index.html` / `app.js` / `styles.css` の3枚で完結します。
+フロントの実装は `index.html` / `app.js` / `styles.css` の3枚に集約しています。
 
-## 使い方
+## セットアップ
 
-`index.html` をブラウザで開くだけです。初回起動時にサンプルの顧客3件・商談5件が投入されます。
+1. Supabase プロジェクトを作り、SQL Editor で [supabase.sql](supabase.sql) を実行（テーブル・RLS・初期データを作成）。
+2. `.env` を作成し、接続情報を記入（このファイルはコミットしない）。
 
-```bash
-# もしくは簡易サーバーで
-python3 -m http.server 8000
-# → http://localhost:8000/index.html
-```
+   ```bash
+   VITE_SUPABASE_URL=https://<your-project>.supabase.co
+   VITE_SUPABASE_PUBLISHABLE_KEY=<your-publishable-key>
+   ```
+
+3. 依存をインストールして開発サーバーを起動。
+
+   ```bash
+   npm install
+   npm run dev
+   # → http://localhost:5173/
+   ```
 
 ## データ構造
 
-- 顧客: `localStorage` キー `crm-customers`（配列）
-- 商談: `localStorage` キー `crm-deals`（配列、`customerId` で顧客を参照）
+- 顧客: Supabase テーブル `customers`
+- 商談: Supabase テーブル `deals`（`customer_id` で顧客を参照）
 
 詳細は [spec.md](spec.md) を参照してください。
